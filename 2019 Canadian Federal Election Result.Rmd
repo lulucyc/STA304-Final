@@ -1,0 +1,281 @@
+---
+title: "2019 Canadian Federal Election Result Prediction between Liberal and Conservative"
+author: "Yuchen Cong"
+date: "Dec 9, 2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(devtools)
+library(jtools)
+library(lme4)
+library(pROC)
+library(stringr)
+library(cesR)
+library(labelled)
+# Loading in the 2019 CES Online surveys
+get_ces("ces2019_web")
+
+```
+
+```{r}
+# Loading in the survey dataset
+survey_data <- ces2019_web
+
+# Loading in the cleaned census Data
+census_data <- read_csv("/Users/Lulu/census_data_2017.csv")
+```
+
+
+## Abstract
+
+Canadian Federal Election is very important and relevant to every Canadian. It is helpful to use statistical methods to predict the result ahead of the election. In this report, by applying a logistic regression model along with the post-stratification method, we will produce a prediction of the 2019 Canadian Federal Election result on the winner between the Liberal Party and the Conservative Party. 
+
+## Keywords
+
+**Canada**, **Election**, **Liberal**, **Conservative**, **Logistic Regression**, **Post-Stratification**
+
+## Introduction
+
+It's now 2020, and we all know that the Liberal Party won the election in 2019. However, it is important to know how to apply our knowledge and skills in real life. Then this report combines many statistical methods in order to make predictions on whether the Liberal Party would win the 2019 Canadian Federal Election using the census dataset (Ruus, 2020). 
+
+There are many factors that could affect voters' intentions about the election such as their age and gender, and the province they live in. In this report, we will predict the 2019 Canadian Federal Election by using these factors. A Multilevel Regression Model with Post-stratification (MRP) is a statistical technique that will be introduced in the analysis. The model is built up using the survey dataset (Stephenson, et al., 2020), then applying the post-stratification would partition datasets into cells, and finally, the model could make predictions of each cell in the census dataset (Ruus, 2017). Detailed information and steps will be shown in the following sections.
+
+
+## Methodology
+
+### Data
+
+After grabbing data from the survey and census datasets, we clean the data in each dataset. 
+
+First of all, we filter out all voters that are not eligible to vote. Citizens with age over 18 are eligible. Since we are only interested in the results between the Liberal Party and Conservative Party so that a filter is applied to the "vote_choice" variable, which is also our response variable. 
+
+Then for the survey dataset, we adjust the variable's names and content in order to match up with the census dataset. Note that variables "gender" and "province" have more categories than their corresponding variables in the census dataset, therefore, we remove the extra categories by naming them "NA". We remove all "NA" in the survey dataset. The response variable is binary, hence, if voters vote for the Liberal party, "vote_choice" is recorded as 1, otherwise, it will be recorded as 0.
+
+Similarly, for the census dataset, variable's names and categories are adjusted. The variable "age" is changed from numeric to an integer. 
+
+
+```{r}
+## Data Cleaning Process##
+# Survey Data
+# Filter out citizens who are eligible to vote
+# Filter out voters who vote for Liberal Party or Conservative Party
+survey <- survey_data %>%
+  filter(cps19_citizenship == 4) %>% 
+  filter(cps19_votechoice == 1 | cps19_votechoice == 2)
+#survey <- na.omit(survey)
+
+# Census Data
+# Filter out citizens who are eligible to vote
+census <- census_data %>%
+  filter(age >= 18.0) %>% 
+  filter(citizenship_status == "By birth" | citizenship_status == "By naturalization")
+  
+census <- na.omit(census)
+
+## Match up survey and census with age
+# Survey Data
+survey <- survey %>% mutate(age = cps19_age)
+
+# Census Data
+census <- census %>% mutate(age =  as.integer(age))
+
+## Match up survey and census with gender
+# Survey Data
+survey <- survey %>% mutate(gender = case_when(cps19_gender == 1 ~ "Male",
+                                               cps19_gender == 2 ~ "Female",
+                                               cps19_gender == 3 ~ "NA")) %>%
+                     filter(gender != "NA")
+
+# Census Data
+census <- census %>% mutate(gender = sex)
+
+## Match up survey and census with province
+# Survey Data
+survey <- survey %>% mutate(province = case_when(cps19_province == 14 ~ "Alberta",
+                                                 cps19_province == 15 ~ "British Columbia",
+                                                 cps19_province == 16 ~ "Manitoba",
+                                                 cps19_province == 17 ~ "New Brunswick",
+                                                 cps19_province == 18 ~ "Newfoundland and Labrador",
+                                                 cps19_province == 19 ~ "NA",
+                                                 cps19_province == 20 ~ "Nova Scotia",
+                                                 cps19_province == 21 ~ "NA",
+                                                 cps19_province == 22 ~ "Ontario",
+                                                 cps19_province == 23 ~ "Prince Edward Island",
+                                                 cps19_province == 24 ~ "Quebec",
+                                                 cps19_province == 25 ~ "Saskatchewan",
+                                                 cps19_province == 26 ~ "NA")) %>%
+                     filter(province != "NA")
+
+## Create new variable vote_choice
+# To see if voters vote for Liberal Party
+survey <- survey %>% mutate(vote_choice = ifelse(cps19_votechoice == 1,1,0))
+```
+
+
+\newpage
+### Model
+
+In this report, we fit a generalized linear mixed-effects logistic regression model by using "glmer()" (in package “lme4”). We define a cell using variables "age" and "gender". The model predicts the Liberal party would win if the proportion is greater than 0.5, with the Conservative party as reference. The model is fitted with random intercept.
+
+The multilevel regression model has the equation:
+$$ P(Y_i = Vote\  for\  Liberal \ | \ cell_j) = logit^{-1}(\alpha + \alpha_j+ \beta_{[i]}^{\ age} + \beta_{[i]}^{\ gender} + \beta_{[i]}^{\ province}  )$$
+Where $ P(Y_i = Vote\  for\  Liberal \ | \ cell_j) $ represents the probability that Liberal party wins the election of each individual observation i. $ \alpha $ is the fixed intercept, and $ \alpha_j $ follows $N(0,\sigma_{\alpha}^2)$ and is vary from each $ j^{th} $ cell. $ \beta_{[i]}^{\ age} $, $ \beta_{[i]}^{\ gender} $ and $ \beta_{[i]}^{\ province $ have constant slopes. 
+
+```{r}
+survey <- survey %>% select(vote_choice, age, gender, province)
+census <- census %>% select(age, gender, province)
+
+# Creating cell variable 
+survey$cell <- paste(survey$age, survey$gender)
+census$cell <- paste(census$age, census$gender)
+
+survey_factor <- c("vote_choice", "age", "gender", "province", "cell")
+survey[survey_factor] <- lapply(survey[survey_factor], factor) 
+census_factor <- c("age", "gender", "province", "cell")
+census[census_factor] <- lapply(census[census_factor], factor) 
+survey$vote_choice <- relevel(survey$vote_choice, ref = "0")    
+
+```
+
+
+
+```{r}
+model <- glmer(vote_choice ~ (1 | cell) + age + gender + province, data = survey, family = binomial)
+
+summ(model)
+```
+
+
+
+### Post-Stratification
+
+In the model, we create a cell variable including "age" and "gender" in order to apply the post-stratification technique. By definition, MRP is a technique in statistics to make correction of model estimation between the sample population and target population. In this case, we part the datasets into 126 cells and use the model based on the survey dataset to estimate the result in the census dataset in each cell. 
+
+\newpage
+## Results
+
+### Data Result
+
+```{r Table 1}
+# Summary Table of Voting Rates in Provinces
+survey_data <- survey_data  %>% 
+  filter(cps19_votechoice == 1 | cps19_votechoice == 2) %>% 
+  mutate(vote_liberal = ifelse(cps19_votechoice == 1,1,0)) 
+  
+
+sum_table <- survey_data %>% 
+  group_by(cps19_province) %>% 
+  summarise(n = n(), 
+            vote_rate_liberal = mean(vote_liberal), 
+            vote_rate_conservative = 1-mean(vote_liberal),
+            province_winner = 
+              ifelse(vote_rate_liberal > vote_rate_conservative, "Liberal", 
+                     ifelse(vote_rate_liberal < vote_rate_conservative, "Conservative", "Tie")))
+
+# Change column names
+colnames(sum_table)[1] <- "Province"
+colnames(sum_table)[2] <- "Total Votes"
+colnames(sum_table)[3] <- "Liberal Vote Rates"
+colnames(sum_table)[4] <- "Conservative Vote Rates"
+colnames(sum_table)[5] <- "Province Winner"
+
+
+kable(sum_table, caption = "Summary of Voting Rates in each Province", digits = 3, format = "markdown", align = "cccc", padding= 3) 
+
+```
+
+- Table 1 is a summary of the voting rate between the Liberal party and the Conservative party in each province. The result shows Liberal party wins in 8 provinces compared with the Conservative party gains support from only 4 provinces. 
+
+### Model Result
+
+```{r Table 2}
+# Model Results 
+kbl(broom::tidy(model)[1:10,], caption = "Summary Table of the Model", 
+      digits = 3, format = "markdown", align = "cccc", padding= 3) 
+```
+
+- Table 2 contains the first 10 observations from the summary table of the model. Coefficients and intercepts of each variable show up in this table. From the table, we can check the statistical significance of each variable by p-value, the smaller the p-value, the variable will be more significant to the outcome.  
+
+### Post-Stratification
+
+```{r}
+# post-stratification calculation
+census$estimate <- model %>%
+  predict(newdata = census, type = "response")
+
+Y_hat_PS <- census %>%
+  mutate(alp_predict_prop = estimate) %>%
+  summarise(alp_predict = sum(alp_predict_prop) / nrow(census))
+
+Y_hat_PS
+```
+
+- As in the **Model** section, the assumption is that if the proportion is greater than 50%, then the Liberal party would win the election. We calculate the post-stratification estimate $ \hat{y}^{PS} = 0.535 $, which 0.535 > 0.5 shows that the model predicts Liberal party will be the winner. 
+
+\newpage
+## Discussion
+
+### Summary
+
+At the beginning of the report, we choose the 2019 Canadian Election Study Online Survey as the survey dataset (Stephenson, et al., 2020), and Canadian general social surveys (GSS) is selected as the census dataset (Ruus, 2020). We firstly clean up both datasets to match up variables between them and make assumptions such that only Canadian citizens with age over 18 are eligible to vote. Then a multilevel regression model is fitted using the cleaned datasets. After calculating the post-stratification estimate, we get the model prediction. We create a table to show the voting result in each province which supports the model prediction. 
+
+### Conclusions
+
+In the **Result** section, the post-stratification estimate shows that our model predicts the Liberal party wins the election with a proportion of 53.5% votes. Table 1 supports the model prediction. Therefore, we predict the Liberal party will win the 2019 Canadian Federal Election. 
+
+### Weakness 
+
+- In the data cleaning process, we remove all observations that are not voting for either Liberal or Conservative parties. In this case, the dataset gets smaller which reduces the accuracy of our model prediction. 
+- It is difficult to run a more complicated model, then we only choose a few variables, so that variables chosen to put into the cell are limited.
+
+### Next Steps
+
+- In the future analysis, we should use all possible data to be more realistic, since in the election there will not only be two parties competing. 
+- We should choose as many variables as possible so that the model prediction will be more precise. 
+- A larger dataset can support our model better. 
+
+
+
+\newpage
+## References
+
+- Stephenson, Laura B; Harell, Allison; Rubenson, Daniel; Loewen, Peter John, 2020, "2019 Canadian Election Study - Online Survey", https://doi.org/10.7910/DVN/DUS88V, Harvard Dataverse, V1
+
+- Ruus, L. (2003, December 16). Canadian general social surveys (GSS). Retrieved October 16, 2020, from https://sda-artsci-utoronto-ca.myaccess.library.utoronto.ca/sdaweb/html/gss.htm
+
+- Cite R : R Core Team (2019). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.
+
+- Cite “tidyverse”:  Wickham et al., (2019). Welcome to the tidyverse. Journal of Open Source Software, 4(43), 1686, https://doi.org/10.21105/joss.01686
+
+- Cite “ggplot2” : H. Wickham. ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York, 2016.
+
+- Cite “dplyr” :   Hadley Wickham, Romain François, Lionel Henry and Kirill Müller (2020). dplyr: A Grammar of Data Manipulation. R package version 1.0.2. https://CRAN.R-project.org/package=dplyr
+
+- Cite “haven”: Hadley Wickham and Evan Miller (2020). haven: Import and Export 'SPSS', 'Stata' and 'SAS' Files. R package version 2.3.1.https://CRAN.R-project.org/package=haven
+
+- Cite “lme4”: Douglas Bates, Martin Maechler, Ben Bolker, Steve Walker (2015). Fitting Linear Mixed-Effects Models Using lme4. Journal of Statistical Software, 67(1), 1-48. doi:10.18637/jss.v067.i01.
+
+- Cite “pROC”: Xavier Robin, Natacha Turck, Alexandre Hainard, Natalia Tiberti, Frédérique Lisacek, Jean-Charles Sanchez and Markus Müller (2011). pROC: an open-source package for R and S+ to analyze and compare ROC curves. BMC Bioinformatics, 12, p. 77.  DOI: 10.1186/1471-2105-12-77 <http://www.biomedcentral.com/1471-2105/12/77/>
+
+- Cite “knitr”: Yihui Xie (2020). knitr: A General-Purpose Package for Dynamic Report Generation in R. R package version 1.27.
+
+- Cite “kableExtra”: Hao Zhu (2020). kableExtra: Construct Complex Table with 'kable' and Pipe Syntax. R package version 1.2.1. https://CRAN.R-project.org/package=kableExtra
+
+- Cite “devtools”: Hadley Wickham, Jim Hester and Winston Chang (2020). devtools: Tools to Make Developing R Packages Easier. R package version 2.3.2. https://CRAN.R-project.org/package=devtools
+
+- Cite “jtools”: Long JA (2020). _jtools: Analysis and Presentation of Social Scientific Data_. R package version 2.1.0, <URL: https://cran.r-project.org/package=jtools>.
+
+- Cite “stringr”: Hadley Wickham (2019). stringr: Simple, Consistent Wrappers for Common String Operations. Rpackage version 1.4.0. https://CRAN.R-project.org/package=stringr
+
+- Alexander, Rohan, and Sam Caetano. 2 Nov. 2020. “01-data_cleaning-post-strat1.R”. Census Dataset cleaning process code.
+
+- Alexander, Rohan, and Sam Caetano. 7 Oct. 2020. “gss_cleaning.R”. GSS dataset cleaning process code.
